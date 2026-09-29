@@ -43,16 +43,46 @@ CHUNK_OVERLAP = 50
 class RAGPipeline:
     """RAG Pipeline for document analysis"""
     
-    def __init__(self, pdf_path: str, api_key: str = None):
+    def __init__(
+        self,
+        pdf_path: str,
+        api_key: str = None,
+        chunk_size: int = CHUNK_SIZE,
+        chunk_overlap: int = CHUNK_OVERLAP,
+        collection_name: str = None,
+        persist_directory: str = CHROMA_DB_PATH,
+        model_name: str = "gemini-flash-latest",
+    ):
         """
         Initialize RAG pipeline
         
         Args:
             pdf_path: Path to PDF file
-            api_key: Antigravity API key (optional, reads from Antigravity_API_KEY env var)
+            api_key: Gemini API key (optional, reads from GOOGLE_API_KEY env var)
+            chunk_size: Chunk size for text splitting
+            chunk_overlap: Chunk overlap for text splitting
+            collection_name: ChromaDB collection name
+            persist_directory: Directory to persist ChromaDB
+            model_name: Gemini model name (default: gemini-flash-latest)
         """
         self.pdf_path = pdf_path
         self.api_key = api_key or os.getenv("GOOGLE_API_KEY")
+        self.chunk_size = chunk_size
+        self.chunk_overlap = chunk_overlap
+        self.persist_directory = persist_directory
+        self.model_name = model_name
+        
+        # Determine collection name based on file name if not provided
+        if collection_name:
+            self.collection_name = collection_name
+        else:
+            base_name = Path(pdf_path).stem
+            # Clean collection name for Chroma (alphanumeric, underscores, hyphens, 3-63 chars)
+            clean_name = "".join(c if c.isalnum() or c in ("-", "_") else "_" for c in base_name)
+            clean_name = clean_name[:60] if clean_name else "doc_collection"
+            if len(clean_name) < 3:
+                clean_name = clean_name + "_collection"
+            self.collection_name = clean_name
         
         if not self.api_key:
             logger.error("API key not found. Set GOOGLE_API_KEY as an environment variable or pass it as argument.")
@@ -65,6 +95,8 @@ class RAGPipeline:
         self.vectorstore = None
         self.llm = None
         self.qa_chain = None
+        self.total_pages = 0
+        self.total_chunks = 0
         
         logger.info("🚀 Initializing RAG Pipeline...")
         self._setup()
@@ -74,12 +106,14 @@ class RAGPipeline:
         # Step 1: Load PDF
         logger.info("Step 1/6 | 📄 Loading PDF: %s", self.pdf_path)
         documents = self._load_pdf()
-        logger.info("Step 1/6 | ✅ Loaded %d page(s) from PDF", len(documents))
+        self.total_pages = len(documents)
+        logger.info("Step 1/6 | ✅ Loaded %d page(s) from PDF", self.total_pages)
         
         # Step 2: Split into chunks
-        logger.info("Step 2/6 | ✂️  Splitting into chunks (size=%d, overlap=%d)", CHUNK_SIZE, CHUNK_OVERLAP)
+        logger.info("Step 2/6 | ✂️  Splitting into chunks (size=%d, overlap=%d)", self.chunk_size, self.chunk_overlap)
         chunks = self._split_documents(documents)
-        logger.info("Step 2/6 | ✅ Created %d chunks", len(chunks))
+        self.total_chunks = len(chunks)
+        logger.info("Step 2/6 | ✅ Created %d chunks", self.total_chunks)
         
         # Step 3: Create embeddings
         logger.info("Step 3/6 | 🧠 Loading HuggingFace embedding model: sentence-transformers/all-MiniLM-L6-v2")
@@ -89,21 +123,20 @@ class RAGPipeline:
         logger.info("Step 3/6 | ✅ Embedding model loaded successfully")
         
         # Step 4: Create vector store
-        logger.info("Step 4/6 | 💾 Creating Chroma vector store at: %s", CHROMA_DB_PATH)
+        logger.info("Step 4/6 | 💾 Creating Chroma vector store at: %s (collection: %s)", self.persist_directory, self.collection_name)
         self.vectorstore = Chroma.from_documents(
             documents=chunks,
             embedding=self.embeddings,
-            persist_directory=CHROMA_DB_PATH,
-            collection_name="offer_letter"
+            persist_directory=self.persist_directory,
+            collection_name=self.collection_name
         )
-        print(self.vectorstore)
-        logger.info("Step 4/6 | ✅ Vector store created with collection 'offer_letter'")
+        logger.info("Step 4/6 | ✅ Vector store created with collection '%s'", self.collection_name)
         
         # Step 5: Setup LLM
-        logger.info("Step 5/6 | Initializing Google Gemini LLM (model=gemini-3.6-flash)")
+        logger.info("Step 5/6 | Initializing Google Gemini LLM (model=%s)", self.model_name)
         self.llm = ChatGoogleGenerativeAI(
             google_api_key=self.api_key,
-            model="gemini-3.6-flash",
+            model=self.model_name,
             temperature=0.7,
         )
         logger.info("Step 5/6 | Gemini LLM initialized (temperature=0.7)")
@@ -122,25 +155,19 @@ class RAGPipeline:
             logger.error("PDF file not found: %s", self.pdf_path)
             raise FileNotFoundError(f"PDF not found: {self.pdf_path}")
         
-        #logger.debug("Starting PyPDFLoader for: %s", self.pdf_path)
         loader = PyPDFLoader(self.pdf_path)
-        print('loader',loader)
         documents = loader.load()
-        print('documents',documents)
-        #logger.debug("PyPDFLoader finished. Pages loaded: %d", len(documents))
         return documents
     
     def _split_documents(self, documents):
         """Split documents into chunks"""
         logger.debug("Splitting %d document(s) using RecursiveCharacterTextSplitter", len(documents))
         splitter = RecursiveCharacterTextSplitter(
-            chunk_size=CHUNK_SIZE,
-            chunk_overlap=CHUNK_OVERLAP,
+            chunk_size=self.chunk_size,
+            chunk_overlap=self.chunk_overlap,
             separators=["\n\n", "\n", " ", ""]
         )
         chunks = splitter.split_documents(documents)
-        print('chunks',chunks)
-        #logger.debug("Splitting complete. Total chunks: %d", len(chunks))
         return chunks
     
     def _create_qa_chain(self):

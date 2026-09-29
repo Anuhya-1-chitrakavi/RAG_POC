@@ -31,7 +31,12 @@ ls Chitrakavi_Lakshmi_Anuhya_-_Offer_Letter.pdf
 
 ## Step 4: Run!
 
-**Interactive mode** (chat with your PDF):
+**Option 1: Launch Streamlit Web UI** (Recommended):
+```bash
+streamlit run app.py
+```
+
+**Option 2: CLI Interactive Mode**:
 ```bash
 python rag_pipeline.py
 ```

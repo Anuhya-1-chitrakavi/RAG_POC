@@ -4,12 +4,13 @@ A complete, production-ready RAG (Retrieval-Augmented Generation) pipeline that 
 
 ## 🎯 Features
 
+- **Streamlit Web UI** - Interactive web interface for uploading handbooks/PDFs and chatting
 - **Smart PDF Loading** - Automatically loads and processes PDFs
 - **Intelligent Chunking** - Splits documents into optimal-sized chunks with overlap
-- **Vector Embeddings** - Uses HuggingFace embeddings (no API key needed)
+- **Vector Embeddings** - Uses HuggingFace embeddings (sentence-transformers)
 - **Local Vector DB** - Chroma for fast similarity search
-- **Claude LLM** - Powered by Anthropic's Claude for intelligent responses
-- **Interactive CLI** - Ask questions in real-time
+- **Google Gemini LLM** - Powered by Google Gemini for intelligent responses
+- **Interactive CLI & Web Chat** - Ask questions in real-time with source citations
 - **Batch Processing** - Process multiple questions at once
 - **Source Attribution** - Know which parts of the document support answers
 
