@@ -60,8 +60,9 @@ python example_usage.py
 Your RAG pipeline is ready. Try these questions:
 - "What is the CTC mentioned?"
 - "When is the join date?"
-- "What benefits are included?"
-- "Explain the probation terms"
+- "What benefits a1e included?"
+- "Explain the probati
+on terms"
 - "summarize" (to get full summary)
 
 ## Troubleshooting

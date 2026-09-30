@@ -1,5 +1,4 @@
 import os
-import tempfile
 from pathlib import Path
 import streamlit as st
 from dotenv import load_dotenv
@@ -17,7 +16,7 @@ st.set_page_config(
     initial_sidebar_state="expanded",
 )
 
-# Custom CSS styling for a modern, clean look
+# Custom CSS styling
 st.markdown("""
 <style>
     .main-title {
@@ -33,20 +32,14 @@ st.markdown("""
         font-size: 1.05rem;
         margin-bottom: 1.5rem;
     }
-    .metric-card {
-        background-color: #f8fafc;
-        border: 1px solid #e2e8f0;
-        border-radius: 10px;
-        padding: 12px 16px;
-        text-align: center;
-    }
-    .source-box {
-        background-color: #f1f5f9;
-        border-left: 4px solid #3b82f6;
-        padding: 10px 14px;
-        border-radius: 0 8px 8px 0;
-        margin-top: 8px;
-        font-size: 0.9rem;
+    .doc-pill {
+        background-color: #e2e8f0;
+        border-radius: 12px;
+        padding: 4px 10px;
+        font-size: 0.85rem;
+        font-weight: 500;
+        display: inline-block;
+        margin: 2px 4px 2px 0;
     }
 </style>
 """, unsafe_allow_html=True)
@@ -62,39 +55,52 @@ def init_session_state():
         st.session_state.messages = []
     if "rag_pipeline" not in st.session_state:
         st.session_state.rag_pipeline = None
-    if "current_file" not in st.session_state:
-        st.session_state.current_file = None
+    if "current_files" not in st.session_state:
+        st.session_state.current_files = []
     if "summary_text" not in st.session_state:
         st.session_state.summary_text = None
     if "file_stats" not in st.session_state:
-        st.session_state.file_stats = {"pages": 0, "chunks": 0}
+        st.session_state.file_stats = {"docs": 0, "pages": 0, "chunks": 0}
 
+
+from langchain_huggingface import HuggingFaceEmbeddings
+
+@st.cache_resource(show_spinner="🧠 Loading embedding model into memory...")
+def get_cached_embeddings():
+    """Load and cache HuggingFace embeddings model in memory once"""
+    return HuggingFaceEmbeddings(model_name="sentence-transformers/all-MiniLM-L6-v2")
 
 init_session_state()
 
 
-def load_pipeline(file_path: str, api_key: str, chunk_size: int, chunk_overlap: int, model_name: str):
-    """Load and index PDF into RAGPipeline"""
-    with st.spinner("📄 Reading document, generating embeddings, and building vector index..."):
+def load_pipeline(file_paths: list, api_key: str, chunk_size: int, chunk_overlap: int, model_name: str):
+    """Load and index multiple PDFs into RAGPipeline with instant cache reuse"""
+    num_docs = len(file_paths)
+    doc_label = f"{num_docs} document{'s' if num_docs > 1 else ''}"
+    
+    with st.spinner(f"📄 Checking vector cache & indexing {doc_label}..."):
         try:
+            cached_embeds = get_cached_embeddings()
             rag = RAGPipeline(
-                pdf_path=file_path,
+                pdf_path=file_paths,
                 api_key=api_key,
                 chunk_size=chunk_size,
                 chunk_overlap=chunk_overlap,
-                model_name=model_name
+                model_name=model_name,
+                embeddings=cached_embeds,
             )
             st.session_state.rag_pipeline = rag
-            st.session_state.current_file = Path(file_path).name
+            st.session_state.current_files = [Path(p).name for p in file_paths]
             st.session_state.file_stats = {
+                "docs": rag.total_docs,
                 "pages": rag.total_pages,
                 "chunks": rag.total_chunks
             }
-            st.session_state.messages = []  # reset conversation for new doc
+            st.session_state.messages = []  # reset conversation for new docs
             st.session_state.summary_text = None
-            st.success(f" Successfully processed **{Path(file_path).name}** ({rag.total_pages} pages, {rag.total_chunks} chunks)")
+            st.success(f"✅ Ready! Indexed **{rag.total_docs} document(s)** ({rag.total_pages} total pages, {rag.total_chunks} chunks)")
         except Exception as e:
-            st.error(f"❌ Failed to load document: {str(e)}")
+            st.error(f"❌ Failed to load documents: {str(e)}")
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -115,46 +121,53 @@ with st.sidebar:
 
     st.divider()
 
-    # Upload Section
-    st.subheader("📁 Handbook / PDF Upload")
+    # Multi-Document Upload Section
+    st.subheader("📁 Document / PDF Upload")
     upload_method = st.radio(
         "Select Upload Method",
-        ["Upload File (Browser)", "Local File Path"],
+        ["Upload Files (Browser)", "Local File Path(s)"],
         index=0
     )
 
-    selected_file_path = None
+    selected_file_paths = []
     trigger_load = False
 
-    if upload_method == "Upload File (Browser)":
-        uploaded_file = st.file_uploader(
-            "Upload your Handbook (PDF)",
+    if upload_method == "Upload Files (Browser)":
+        uploaded_files = st.file_uploader(
+            "Upload PDF Documents",
             type=["pdf"],
-            help="Upload an employee handbook or any PDF document to analyze"
+            accept_multiple_files=True,
+            help="Select one or multiple PDF documents to analyze together"
         )
-        if uploaded_file is not None:
-            save_path = UPLOAD_DIR / uploaded_file.name
-            with open(save_path, "wb") as f:
-                f.write(uploaded_file.getbuffer())
-            selected_file_path = str(save_path)
+        if uploaded_files:
+            for uploaded_file in uploaded_files:
+                save_path = UPLOAD_DIR / uploaded_file.name
+                with open(save_path, "wb") as f:
+                    f.write(uploaded_file.getbuffer())
+                selected_file_paths.append(str(save_path))
             
-            # Button to process if not yet processed
-            if st.session_state.current_file != uploaded_file.name:
-                trigger_load = st.button("🚀 Process & Index Handbook", type="primary", use_container_width=True)
+            uploaded_names = [f.name for f in uploaded_files]
+            if st.session_state.current_files != uploaded_names:
+                btn_label = f"🚀 Process & Index {len(uploaded_files)} File{'s' if len(uploaded_files) > 1 else ''}"
+                trigger_load = st.button(btn_label, type="primary", use_container_width=True)
     else:
         default_local_path = r"C:\Users\Anuhya\Downloads\Employee_handbook.pdf"
-        local_path_input = st.text_input(
-            "Local PDF Path",
+        local_path_input = st.text_area(
+            "Local PDF Path(s)",
             value=default_local_path,
-            help="Absolute path to the handbook PDF on your computer"
+            help="Enter one or more absolute paths (one per line) to PDF files on your computer",
+            height=85
         )
         if local_path_input:
-            selected_file_path = local_path_input.strip()
-            if Path(selected_file_path).exists():
-                st.caption(f"✅ Found file on disk ({round(os.path.getsize(selected_file_path) / 1024, 1)} KB)")
-            else:
-                st.caption("⚠️ File not found at this path")
-            trigger_load = st.button("🚀 Load Local Handbook", type="primary", use_container_width=True)
+            lines = [line.strip() for line in local_path_input.splitlines() if line.strip()]
+            for p_str in lines:
+                if Path(p_str).exists():
+                    selected_file_paths.append(p_str)
+            
+            st.caption(f"✅ Found {len(selected_file_paths)} / {len(lines)} valid file(s) on disk")
+            if selected_file_paths:
+                btn_label = f"🚀 Load {len(selected_file_paths)} Local File{'s' if len(selected_file_paths) > 1 else ''}"
+                trigger_load = st.button(btn_label, type="primary", use_container_width=True)
 
     st.divider()
 
@@ -162,136 +175,131 @@ with st.sidebar:
     with st.expander("🛠️ Advanced Model & Chunk Settings"):
         model_name = st.selectbox(
             "Gemini Model",
-            options=["gemini-flash-latest", "gemini-pro-latest", "gemini-2.5-flash-lite"],
+            options=["gemini-flash-lite-latest", "gemini-3.5-flash-lite", "gemini-3.1-flash-lite", "gemini-flash-latest"],
             index=0
         )
-        chunk_size = st.slider("Chunk Size", min_value=200, max_value=2000, value=500, step=50)
-        chunk_overlap = st.slider("Chunk Overlap", min_value=0, max_value=500, value=50, step=10)
+        chunk_size = st.slider("Chunk Size", min_value=200, max_value=2000, value=1000, step=50)
+        chunk_overlap = st.slider("Chunk Overlap", min_value=0, max_value=500, value=150, step=10)
 
     # Document Status
     st.divider()
     st.subheader("📊 Document Status")
     if st.session_state.rag_pipeline:
-        st.success(f"🟢 Active: **{st.session_state.current_file}**")
-        col1, col2 = st.columns(2)
+        st.success(f"🟢 **{st.session_state.file_stats['docs']} Document(s) Active**")
+        with st.expander("📄 View Active Files", expanded=False):
+            for fname in st.session_state.current_files:
+                st.markdown(f"- `{fname}`")
+        
+        col1, col2, col3 = st.columns(3)
         with col1:
-            st.metric("Pages", st.session_state.file_stats["pages"])
+            st.metric("Files", st.session_state.file_stats["docs"])
         with col2:
+            st.metric("Pages", st.session_state.file_stats["pages"])
+        with col3:
             st.metric("Chunks", st.session_state.file_stats["chunks"])
         
         if st.button("🗑️ Reset Chat History", use_container_width=True):
             st.session_state.messages = []
             st.rerun()
     else:
-        st.info("No document loaded yet. Please upload or specify a handbook PDF.")
+        st.info("No documents loaded yet. Please upload one or more PDFs.")
 
-# Process Document if triggered
-if trigger_load and selected_file_path:
+# Process Documents if triggered
+if trigger_load and selected_file_paths:
     if not api_key:
         st.error("❌ Please provide a Google Gemini API Key in the sidebar or in .env")
-    elif not Path(selected_file_path).exists():
-        st.error(f"❌ File does not exist: {selected_file_path}")
     else:
-        load_pipeline(selected_file_path, api_key, chunk_size, chunk_overlap, model_name)
+        load_pipeline(selected_file_paths, api_key, chunk_size, chunk_overlap, model_name)
 
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Main Interface
 # ─────────────────────────────────────────────────────────────────────────────
-st.markdown('<div class="main-title">📚 Handbook Q&A and Document Assistant</div>', unsafe_allow_html=True)
-st.markdown('<div class="sub-title">Upload your employee handbook or company document and ask questions with AI-powered retrieval & citations.</div>', unsafe_allow_html=True)
+st.markdown('<div class="main-title">📚 RAG Multi-Document Q&A Assistant</div>', unsafe_allow_html=True)
+st.markdown('<div class="sub-title">Upload one or multiple PDF documents and ask questions across all of them with AI-powered semantic search & source citations.</div>', unsafe_allow_html=True)
 
 if not st.session_state.rag_pipeline:
-    st.info("👈 **Get Started**: Upload your Handbook PDF from the sidebar on the left and click **Process & Index Handbook**.")
-    
-    # Preview sample questions
-    st.markdown("### 💡 What you can ask once loaded:")
-    col1, col2, col3 = st.columns(3)
-    with col1:
-        st.markdown("""
-        **📋 Policies & Guidelines**
-        - What are the working hours and attendance policies?
-        - What is the code of conduct?
-        """)
-    with col2:
-        st.markdown("""
-        **🏖️ Leaves & Benefits**
-        - How many annual leaves or sick leaves are allowed?
-        - What health insurance benefits are provided?
-        """)
-    with col3:
-        st.markdown("""
-        **⚖️ Terms & Roles**
-        - What is the notice period and probation duration?
-        - What are the remote work / WFH guidelines?
-        """)
+    st.info("👈 **Get Started**: Upload one or more PDF documents from the sidebar on the left and click **Process & Index**.")
     st.stop()
 
-# Tabs for Chat, Summary, and Help
+# Display active document tags
+st.markdown("**Active Knowledge Base:** " + " ".join([f'<span class="doc-pill">📄 {f}</span>' for f in st.session_state.current_files]), unsafe_allow_html=True)
+st.markdown("")
+
+# Tabs for Chat and Summary
 tab_chat, tab_summary = st.tabs(["💬 Ask Questions", "📑 Document Summary"])
 
 # ── Tab 1: Chat Interface ─────────────────────────────────────────────────────
 with tab_chat:
-    # Quick prompt buttons
-    st.markdown("##### ⚡ Quick Queries")
-    quick_cols = st.columns(4)
-    quick_prompts = [
-        "What are the leave policies?",
-        "What are the working hours & attendance rules?",
-        "What are the employee benefits and perks?",
-        "What is the probation and notice period?",
-    ]
+    chat_container = st.container()
     
-    chosen_prompt = None
-    for i, prompt_text in enumerate(quick_prompts):
-        with quick_cols[i]:
-            if st.button(prompt_text, key=f"quick_{i}", use_container_width=True):
-                chosen_prompt = prompt_text
+    with chat_container:
+        if not st.session_state.messages:
+            st.info("💡 Type your question in the box at the bottom to start asking questions about your document(s).")
+        
+        # Display Chat History chronologically (oldest at top, newest at bottom)
+        for msg in st.session_state.messages:
+            with st.chat_message(msg["role"]):
+                st.markdown(msg["content"])
+                if "sources" in msg and msg["sources"]:
+                    with st.expander(f"🔍 Source Citations ({len(msg['sources'])} chunks)"):
+                        for idx, doc in enumerate(msg["sources"], 1):
+                            source_file = doc.metadata.get("source_name", Path(doc.metadata.get("source", "Document")).name)
+                            page_num = doc.metadata.get("page", "Unknown")
+                            st.markdown(f"**Source {idx} — 📄 `{source_file}` (Page {page_num})**")
+                            st.markdown(f"> {doc.page_content.strip()}")
+                            st.divider()
 
-    st.markdown("---")
+# ── Tab 2: Document Summary ───────────────────────────────────────────────────
+with tab_summary:
+    num_docs = len(st.session_state.current_files)
+    st.subheader(f"📑 Summary for {num_docs} Document{'s' if num_docs > 1 else ''}")
+    
+    if st.session_state.summary_text:
+        st.markdown(st.session_state.summary_text)
+        if st.button("🔄 Regenerate Summary"):
+            with st.spinner("Generating comprehensive summary across all documents..."):
+                st.session_state.summary_text = st.session_state.rag_pipeline.summarize()
+                st.rerun()
+    else:
+        st.write("Generate an executive summary covering key sections, numbers, requirements, and policies across all loaded documents.")
+        if st.button("✨ Generate Document Summary", type="primary"):
+            with st.spinner("Analyzing all context and generating summary..."):
+                try:
+                    summary = st.session_state.rag_pipeline.summarize()
+                    st.session_state.summary_text = summary
+                    st.rerun()
+                except Exception as e:
+                    st.error(f"Error generating summary: {str(e)}")
 
-    # Display Chat History
-    for msg in st.session_state.messages:
-        with st.chat_message(msg["role"]):
-            st.markdown(msg["content"])
-            if "sources" in msg and msg["sources"]:
-                with st.expander(f"🔍 Source Citations ({len(msg['sources'])} chunks)"):
-                    for idx, doc in enumerate(msg["sources"], 1):
-                        page_num = doc.metadata.get("page", "Unknown")
-                        st.markdown(f"**Source {idx} — Page {page_num}**")
-                        st.markdown(f"> {doc.page_content.strip()}")
-                        st.divider()
+# ── Floating Fixed Chat Input at Root Bottom ─────────────────────────────────
+user_query = st.chat_input("Ask any question across your uploaded documents...")
 
-    # Handle user input from chat input or quick prompt
-    user_query = st.chat_input("Ask any question about your handbook...")
-    if chosen_prompt:
-        user_query = chosen_prompt
-
-    if user_query:
-        # Append user message
-        st.session_state.messages.append({"role": "user", "content": user_query})
+if user_query:
+    # 1. Append User Message
+    st.session_state.messages.append({"role": "user", "content": user_query})
+    
+    # 2. Generate Assistant Response
+    with tab_chat:
         with st.chat_message("user"):
             st.markdown(user_query)
-
-        # Assistant response
         with st.chat_message("assistant"):
-            with st.spinner("Searching document and formulating answer..."):
+            with st.spinner("Searching documents and formulating answer..."):
                 try:
                     result = st.session_state.rag_pipeline.query(user_query)
                     answer = result["answer"]
                     sources = result.get("sources", [])
-                    
                     st.markdown(answer)
                     
                     if sources:
                         with st.expander(f"🔍 Source Citations ({len(sources)} chunks)"):
                             for idx, doc in enumerate(sources, 1):
+                                source_file = doc.metadata.get("source_name", Path(doc.metadata.get("source", "Document")).name)
                                 page_num = doc.metadata.get("page", "Unknown")
-                                st.markdown(f"**Source {idx} — Page {page_num}**")
+                                st.markdown(f"**Source {idx} — 📄 `{source_file}` (Page {page_num})**")
                                 st.markdown(f"> {doc.page_content.strip()}")
                                 st.divider()
                     
-                    # Save assistant message
                     st.session_state.messages.append({
                         "role": "assistant",
                         "content": answer,
@@ -301,24 +309,5 @@ with tab_chat:
                     error_msg = f"⚠️ Error processing query: {str(e)}"
                     st.error(error_msg)
                     st.session_state.messages.append({"role": "assistant", "content": error_msg})
-
-# ── Tab 2: Document Summary ───────────────────────────────────────────────────
-with tab_summary:
-    st.subheader(f"📑 Document Summary: {st.session_state.current_file}")
     
-    if st.session_state.summary_text:
-        st.markdown(st.session_state.summary_text)
-        if st.button("🔄 Regenerate Summary"):
-            with st.spinner("Generating comprehensive summary..."):
-                st.session_state.summary_text = st.session_state.rag_pipeline.summarize()
-                st.rerun()
-    else:
-        st.write("Generate an executive summary covering key sections, policies, numbers, and requirements mentioned in the handbook.")
-        if st.button("✨ Generate Handbook Summary", type="primary"):
-            with st.spinner("Reading full context and generating summary..."):
-                try:
-                    summary = st.session_state.rag_pipeline.summarize()
-                    st.session_state.summary_text = summary
-                    st.rerun()
-                except Exception as e:
-                    st.error(f"Error generating summary: {str(e)}")
+    st.rerun()
